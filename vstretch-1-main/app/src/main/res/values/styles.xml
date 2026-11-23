@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Theme chính: StretchX Neon Pink (nền charcoal, nhấn hồng) -->
+    <style name="StretchX.App" parent="@android:style/Theme.Material.NoActionBar">
+        <item name="android:windowBackground">@color/sx_bg</item>
+        <item name="android:statusBarColor">@color/sx_bg</item>
+        <item name="android:navigationBarColor">@color/sx_bg</item>
+        <item name="android:colorAccent">@color/sx_pink</item>
+        <item name="android:colorControlActivated">@color/sx_pink</item>
+        <item name="android:textColorPrimary">@color/sx_text</item>
+        <item name="android:textColorSecondary">@color/sx_muted</item>
+    </style>
+
+    <!-- Hộp thoại: bề mặt nâng, viền mảnh, góc bo -->
+    <style name="StretchX.Dialog" parent="@android:style/Theme.Material.Dialog.Alert">
+        <item name="android:windowBackground">@drawable/dialog_bg</item>
+        <item name="android:colorAccent">@color/sx_pink</item>
+        <item name="android:textColorPrimary">@color/sx_text</item>
+        <item name="android:textColorSecondary">@color/sx_muted</item>
+    </style>
+
+    <!-- Cửa sổ nổi: không dùng animation thêm/bỏ cửa sổ của hệ thống (tránh khựng khi bật/tắt) -->
+    <style name="StretchX.NoAnim" parent="@android:style/Animation">
+        <item name="android:windowEnterAnimation">@null</item>
+        <item name="android:windowExitAnimation">@null</item>
+        <item name="android:windowShowAnimation">@null</item>
+        <item name="android:windowHideAnimation">@null</item>
+    </style>
+</resources>

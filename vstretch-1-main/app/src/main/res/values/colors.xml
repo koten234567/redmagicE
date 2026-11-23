@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="sx_bg">#121214</color>
+    <color name="sx_surface">#1B1B1F</color>
+    <color name="sx_surface_hi">#25252B</color>
+    <color name="sx_line">#30303A</color>
+    <color name="sx_pink">#FF2E93</color>
+    <color name="sx_pink_soft">#D98AB5</color>
+    <color name="sx_text">#F5F5F7</color>
+    <color name="sx_muted">#A3A3AE</color>
+</resources>
