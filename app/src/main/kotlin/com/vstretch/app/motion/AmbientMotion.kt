@@ -14,6 +14,8 @@ import android.widget.FrameLayout
 /** Quầng sáng hồng tĩnh (vẽ 1 lần, cache bằng hardware layer) — chỉ dịch chuyển bằng transform. */
 private class GlowBlob(c: Context) : View(c) {
     private val p = Paint(Paint.ANTI_ALIAS_FLAG)
+    private var tint = Accent.NORMAL
+    private var strong = false
 
     init { setLayerType(LAYER_TYPE_HARDWARE, null) }
 
@@ -22,8 +24,21 @@ private class GlowBlob(c: Context) : View(c) {
         setMeasuredDimension(s, s)
     }
 
-    override fun onSizeChanged(w: Int, h: Int, ow: Int, oh: Int) {
-        p.shader = RadialGradient(w / 2f, h / 2f, w / 2f, intArrayOf(0x26FF2E93, 0x00FF2E93), null, Shader.TileMode.CLAMP)
+    override fun onSizeChanged(w: Int, h: Int, ow: Int, oh: Int) { rebuild() }
+
+    /** Đổi sắc độ (Dynamic Accent) / cường độ (Enhanced) — dựng lại shader một lần, không animate từng khung. */
+    fun configure(color: Int, enhanced: Boolean) {
+        if (color == tint && enhanced == strong) return
+        tint = color; strong = enhanced
+        rebuild()
+        invalidate()
+    }
+
+    private fun rebuild() {
+        if (width <= 0) return
+        val rgb = tint and 0x00FFFFFF
+        val a = if (strong) 0x3C else 0x26
+        p.shader = RadialGradient(width / 2f, height / 2f, width / 2f, intArrayOf((a shl 24) or rgb, rgb), null, Shader.TileMode.CLAMP)
     }
 
     override fun onDraw(cv: Canvas) {
@@ -47,7 +62,11 @@ class AmbientGlow(c: Context) : FrameLayout(c) {
         addView(blob, LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT, Gravity.TOP or Gravity.END))
     }
 
+    /** Dynamic Accent: sắc độ hồng theo trạng thái. */
+    fun setAccent(color: Int) = blob.configure(color, MotionPreferences.enhanced)
+
     fun setRunning(on: Boolean) {
+        blob.configure(Accent.color, MotionPreferences.enhanced)
         val show = on && !MotionPreferences.reduce
         animate().cancel()
         animate().alpha(if (show) 1f else 0f)

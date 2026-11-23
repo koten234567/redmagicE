@@ -6,6 +6,8 @@ import android.app.AlertDialog
 import android.content.ComponentName
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.graphics.Color
+import android.graphics.Rect
 import android.graphics.drawable.Drawable
 import android.graphics.drawable.Icon
 import android.net.Uri
@@ -20,6 +22,8 @@ import android.text.TextUtils
 import android.text.TextWatcher
 import android.view.Gravity
 import android.view.View
+import android.view.WindowInsets
+import android.view.WindowManager
 import android.widget.Button
 import android.widget.EditText
 import android.widget.FrameLayout
@@ -28,7 +32,19 @@ import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.SeekBar
 import android.widget.TextView
+import com.vstretch.app.motion.ActionButton
 import com.vstretch.app.motion.AmbientGlow
+import com.vstretch.app.motion.BottomSheet
+import com.vstretch.app.motion.CenterMaxWidth
+import com.vstretch.app.motion.Cmd
+import com.vstretch.app.motion.CommandPalette
+import com.vstretch.app.motion.GlowCard
+import com.vstretch.app.motion.Haptics
+import com.vstretch.app.motion.LiquidBar
+import com.vstretch.app.motion.RatioPreview
+import com.vstretch.app.motion.ScanSweep
+import com.vstretch.app.motion.UiPrefs
+import com.vstretch.app.motion.Accent
 import com.vstretch.app.motion.ConnectionChip
 import com.vstretch.app.motion.ExpandablePanel
 import com.vstretch.app.motion.LinkState
@@ -55,11 +71,17 @@ private fun wh(w: Int, h: Int) = "${max(w, h)}×${min(w, h)}"
 
 class MainActivity : Activity() {
     private lateinit var prefs: Prefs
+    private lateinit var uiPrefs: UiPrefs
     private var dev: Dev? = null
     private var devLoadFailed = false
+    private var reloading = false
     private var bigTv: TextView? = null
     private var infoTv: TextView? = null
     private var seek: SeekBar? = null
+    private var previewView: RatioPreview? = null
+    private var usageBar: LiquidBar? = null
+    private var liveCardRef: View? = null
+    private var gamesBtnRef: View? = null
 
     // ---- khung giao diện (Presentation) ----
     private var curScroll: ScrollView? = null
@@ -69,8 +91,18 @@ class MainActivity : Activity() {
     private var glow: AmbientGlow? = null
     private var toasts: ToastHost? = null
     private var chip: ConnectionChip? = null
+    private var sheet: BottomSheet? = null
+    private var palette: CommandPalette? = null
+    private var dockView: View? = null
+    private var sideView: View? = null
+    private var topView: View? = null
+    private var mainView: View? = null
+    private var bodyView: View? = null
+    private var tablet = false
+    private val edge = IntArray(4)          // system insets: trái, trên, phải, dưới
+    private var lastCols = 0
     private var page = 0
-    private var contentWdp = 0
+    private var sheetSpec: SheetSpec? = null
 
     private val ui = Handler(Looper.getMainLooper())
     private val buildRun = Runnable { doBuild() }
@@ -84,9 +116,9 @@ class MainActivity : Activity() {
     override fun onCreate(b: Bundle?) {
         super.onCreate(b)
         prefs = Prefs(this)
+        uiPrefs = UiPrefs(this)
         MotionPreferences.refresh(this)
-        window.statusBarColor = Ui.BG
-        window.navigationBarColor = Ui.BG
+        setupEdgeToEdge()
         Shizuku.addBinderReceivedListenerSticky(binderL)
         Shizuku.addBinderDeadListener(deadL)
         Shizuku.addRequestPermissionResultListener(permL)
@@ -111,6 +143,9 @@ class MainActivity : Activity() {
 
     override fun onDestroy() {
         ui.removeCallbacks(loadTimeout)
+        ui.removeCallbacks(buildRun)
+        sheet?.cancelAnimations()
+        palette?.cancelAnimations()
         Shizuku.removeBinderReceivedListener(binderL)
         Shizuku.removeBinderDeadListener(deadL)
         Shizuku.removeRequestPermissionResultListener(permL)
@@ -120,10 +155,26 @@ class MainActivity : Activity() {
     override fun onConfigurationChanged(c: android.content.res.Configuration) {
         super.onConfigurationChanged(c)
         MotionPreferences.refresh(this)
-        buildShell()
+        buildShell()                      // xoay màn hình / đổi kích thước cửa sổ: dựng lại khung, giữ trang và bottom sheet
     }
 
-    private fun reload() = Engine.refresh(this) { dev = it; devLoadFailed = false; buildUi() }
+    /** Back: palette -> bottom sheet -> về Tổng quan (chuyển trang lùi) -> thoát. */
+    @Suppress("DEPRECATION")
+    override fun onBackPressed() {
+        if (palette?.onBack() == true) return
+        if (sheet?.onBack() == true) return
+        if (page != 0) { goPage(0); return }
+        super.onBackPressed()
+    }
+
+    private fun reload() = Engine.refresh(this) { dev = it; devLoadFailed = false; reloading = false; buildUi() }
+
+    /** Làm mới có chủ ý: hiện Scanning Sweep đúng trong lúc tác vụ đọc đang chạy. */
+    private fun refreshNow() {
+        reloading = true
+        buildUi()
+        reload()
+    }
 
     /** Thông báo toàn cục (Smart Toast). Loại thông báo suy ra từ nội dung — chỉ ở tầng hiển thị. */
     private fun toast(s: String) {
@@ -133,15 +184,100 @@ class MainActivity : Activity() {
             s.startsWith("Đã") || s.contains("✔") -> ToastType.SUCCESS
             else -> ToastType.INFO
         }
+        toasts?.bottomExtra = toastExtra()
         toasts?.show(s, type)
+    }
+
+    /** Chừa chỗ cho thanh điều hướng / system inset / dock để toast không che nút thao tác. */
+    private fun toastExtra(): Int {
+        var e = if (tablet) edge[3] else (nav?.height ?: 0)
+        val dk = dockView
+        if (dk != null && dk.visibility == View.VISIBLE) e += dk.height + dp(12)
+        return e
     }
 
     private fun dp(v: Int) = Ui.dp(this, v)
     private fun dlg() = AlertDialog.Builder(this, R.style.StretchX_Dialog)
 
+    // ---------------------------------------------------------------- Edge-to-edge
+
+    @Suppress("DEPRECATION")
+    private fun setupEdgeToEdge() {
+        window.statusBarColor = Color.TRANSPARENT
+        window.navigationBarColor = Color.TRANSPARENT
+        if (Build.VERSION.SDK_INT >= 30) {
+            window.setDecorFitsSystemWindows(false)
+        } else {
+            window.decorView.systemUiVisibility = View.SYSTEM_UI_FLAG_LAYOUT_STABLE or
+                View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN or View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
+        }
+        if (Build.VERSION.SDK_INT >= 28) {
+            val lp = window.attributes
+            lp.layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
+            window.attributes = lp
+        }
+        if (Build.VERSION.SDK_INT >= 29) {
+            window.isNavigationBarContrastEnforced = false
+            window.isStatusBarContrastEnforced = false
+        }
+    }
+
+    @Suppress("DEPRECATION")
+    private fun readInsets(ins: WindowInsets) {
+        if (Build.VERSION.SDK_INT >= 30) {
+            val i = ins.getInsets(WindowInsets.Type.systemBars() or WindowInsets.Type.displayCutout())
+            edge[0] = i.left; edge[1] = i.top; edge[2] = i.right; edge[3] = i.bottom
+        } else {
+            val cut = if (Build.VERSION.SDK_INT >= 28) ins.displayCutout else null
+            edge[0] = max(ins.systemWindowInsetLeft, cut?.safeInsetLeft ?: 0)
+            edge[1] = max(ins.systemWindowInsetTop, cut?.safeInsetTop ?: 0)
+            edge[2] = max(ins.systemWindowInsetRight, cut?.safeInsetRight ?: 0)
+            edge[3] = max(ins.systemWindowInsetBottom, cut?.safeInsetBottom ?: 0)
+        }
+    }
+
+    /** Áp system insets lên từng phần của khung: nền vẫn tràn sau thanh hệ thống, nội dung/nút được chừa chỗ. */
+    private fun applyInsets() {
+        val l = edge[0]; val t = edge[1]; val r = edge[2]; val b = edge[3]
+        if (tablet) {
+            sideView?.let {
+                it.setPadding(l + dp(14), t + dp(18), dp(14), b + dp(14))
+                (it.layoutParams as? LinearLayout.LayoutParams)?.let { lp -> lp.width = dp(216) + l; it.layoutParams = lp }
+            }
+            mainView?.setPadding(0, t, r, 0)
+        } else {
+            bodyView?.setPadding(l, 0, r, 0)
+            topView?.setPadding(dp(14), t + dp(10), dp(14), dp(6))
+            nav?.setPadding(0, 0, 0, b)
+        }
+        sheet?.setInsets(l, t, r, b)
+        palette?.setInsets(l, t, r)
+        curHost?.setPadding(dp(10), dp(10), dp(10), pageBottomPad())
+        dockView?.let {
+            (it.layoutParams as? FrameLayout.LayoutParams)?.let { lp -> lp.bottomMargin = dp(12) + (if (tablet) b else 0); it.layoutParams = lp }
+        }
+        if (columns() != lastCols) buildUi()
+    }
+
+    private fun pageBottomPad() = dp(16) + (if (uiPrefs.dock) dp(76) else 0) + (if (tablet) edge[3] else 0)
+
+    private fun contentWdpNow(): Int {
+        val dm = resources.displayMetrics
+        val side = if (tablet) dp(216) + edge[0] else edge[0]
+        val avail = dm.widthPixels - side - edge[2]
+        return (min(avail, dp(1040)) / dm.density).toInt()
+    }
+
+    /** Adaptive Layout: số cột theo bề rộng nội dung thực (đổi khi xoay / đổi kích thước cửa sổ). */
+    private fun columns(): Int {
+        val w = contentWdpNow()
+        return if (w >= 960) 3 else if (w >= 640) 2 else 1
+    }
+
     // ---------------------------------------------------------------- UI
 
     private class PageDef(val label: String, val icon: Int)
+    private class SheetSpec(val title: String, val live: Boolean, val build: () -> View)
 
     private val pages = listOf(
         PageDef("Tổng quan", R.drawable.ic_nav_home),
@@ -151,10 +287,11 @@ class MainActivity : Activity() {
         PageDef("Thiết bị", R.drawable.ic_nav_device)
     )
 
-    /** Dựng khung 1 lần (và khi đổi cấu hình): sidebar (tablet) hoặc thanh dưới (điện thoại) + vùng trang + toast. */
+    /** Dựng khung (và khi đổi cấu hình): sidebar (tablet) hoặc thanh dưới (điện thoại), vùng trang, dock, sheet, palette, toast. */
     private fun buildShell() {
-        val tablet = resources.configuration.screenWidthDp >= 600
-        val dm = resources.displayMetrics
+        sheet?.cancelAnimations()
+        palette?.cancelAnimations()
+        tablet = resources.configuration.screenWidthDp >= 600
         val items = pages.map { NavItem(it.label, it.icon) }
 
         val g = AmbientGlow(this); glow = g
@@ -162,32 +299,35 @@ class MainActivity : Activity() {
         val ph = PageHost(this); pageHost = ph
         val ch = ConnectionChip(this); chip = ch
         val nb = NavBar(this, items, tablet) { navigate(it) }; nav = nb
+        val sh = BottomSheet(this).apply { onClosed = { sheetSpec = null } }; sheet = sh
+        val pal = CommandPalette(this).apply { provider = { commands() } }; palette = pal
 
-        val sidebarW = if (tablet) dp(216) else 0
-        val contentW = min(dm.widthPixels - sidebarW, dp(1040))   // giới hạn bề rộng tối đa của nội dung
-        contentWdp = (contentW / dm.density).toInt()
-
-        val main = FrameLayout(this)
-        main.addView(ph, FrameLayout.LayoutParams(contentW, MATCH, Gravity.CENTER_HORIZONTAL))
-        main.addView(tw, FrameLayout.LayoutParams(contentW, MATCH, Gravity.CENTER_HORIZONTAL))
+        val main = FrameLayout(this); mainView = main
+        val wrap = CenterMaxWidth(this, dp(1040))
+        wrap.addView(ph, FrameLayout.LayoutParams(MATCH, MATCH))
+        main.addView(wrap, FrameLayout.LayoutParams(WRAP, MATCH, Gravity.CENTER_HORIZONTAL))
+        val dk = buildDock(); dockView = dk
+        main.addView(dk, FrameLayout.LayoutParams(WRAP, WRAP, Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL).apply { bottomMargin = dp(12) })
 
         val root = FrameLayout(this).apply { setBackgroundColor(Ui.BG) }
         root.addView(g, FrameLayout.LayoutParams(MATCH, MATCH))
 
-        val body = LinearLayout(this)
+        val body = LinearLayout(this); bodyView = body
         if (tablet) {
             body.orientation = LinearLayout.HORIZONTAL
             val side = LinearLayout(this).apply {
                 orientation = LinearLayout.VERTICAL
                 setBackgroundColor(Ui.SURFACE)
                 setPadding(dp(14), dp(18), dp(14), dp(14))
-                addView(Ui.brand(this@MainActivity), LinearLayout.LayoutParams(WRAP, WRAP).apply { bottomMargin = dp(20) })
+                addView(Ui.brand(this@MainActivity), LinearLayout.LayoutParams(WRAP, WRAP).apply { bottomMargin = dp(16) })
+                addView(searchButton(false), LinearLayout.LayoutParams(MATCH, dp(44)).apply { bottomMargin = dp(12) })
                 addView(nb, LinearLayout.LayoutParams(MATCH, WRAP))
                 addView(View(this@MainActivity), LinearLayout.LayoutParams(MATCH, 0, 1f))
                 addView(ch, LinearLayout.LayoutParams(MATCH, WRAP))
                 addView(Ui.tv(this@MainActivity, "v${BuildConfig.VERSION_NAME}", 11f, Ui.DIM).apply { setPadding(dp(4), dp(8), 0, 0) })
             }
-            body.addView(side, LinearLayout.LayoutParams(sidebarW, MATCH))
+            sideView = side; topView = null
+            body.addView(side, LinearLayout.LayoutParams(dp(216), MATCH))
             body.addView(View(this).apply { setBackgroundColor(Ui.LINE) }, LinearLayout.LayoutParams(1, MATCH))
             body.addView(main, LinearLayout.LayoutParams(0, MATCH, 1f))
         } else {
@@ -196,19 +336,52 @@ class MainActivity : Activity() {
                 orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
                 setPadding(dp(14), dp(10), dp(14), dp(6))
                 addView(Ui.brand(this@MainActivity), LinearLayout.LayoutParams(0, WRAP, 1f))
+                addView(searchButton(true), LinearLayout.LayoutParams(dp(44), dp(44)).apply { rightMargin = dp(8) })
                 addView(ch)
             }
+            topView = top; sideView = null
             body.addView(top, LinearLayout.LayoutParams(MATCH, WRAP))
             body.addView(main, LinearLayout.LayoutParams(MATCH, 0, 1f))
             body.addView(View(this).apply { setBackgroundColor(Ui.LINE) }, LinearLayout.LayoutParams(MATCH, 1))
             body.addView(nb.apply { setBackgroundColor(Ui.SURFACE) }, LinearLayout.LayoutParams(MATCH, WRAP))
         }
         root.addView(body, FrameLayout.LayoutParams(MATCH, MATCH))
+        root.addView(sh, FrameLayout.LayoutParams(MATCH, MATCH))
+        root.addView(pal, FrameLayout.LayoutParams(MATCH, MATCH))
+        root.addView(tw, FrameLayout.LayoutParams(MATCH, MATCH))
+        root.setOnApplyWindowInsetsListener { _, ins -> readInsets(ins); applyInsets(); ins }
         setContentView(root)
 
         nb.select(page, false)
         showPage(page, 0)
         updateChip()
+        applyInsets()
+        sheetSpec?.let { sp -> sh.show(sp.title, sp.build(), null, false) }   // khôi phục bottom sheet sau khi xoay
+        root.requestApplyInsets()
+    }
+
+    private fun searchButton(compact: Boolean): View {
+        val ctx = this
+        return LinearLayout(ctx).apply {
+            orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
+            contentDescription = "Tìm kiếm chức năng"
+            isClickable = true
+            background = SurfaceDrawable(Ui.SURFACE_HI, Ui.LINE, dp(1).toFloat(), dp(12).toFloat())
+            setPadding(dp(12), 0, dp(12), 0)
+            if (compact) gravity = Gravity.CENTER
+            addView(ImageView(ctx).apply { setImageResource(R.drawable.ic_search); setColorFilter(Ui.MUTED) },
+                LinearLayout.LayoutParams(dp(20), dp(20)))
+            if (!compact) addView(Ui.tv(ctx, "Tìm kiếm…", 13f, Ui.DIM).apply { setPadding(dp(10), 0, 0, 0) })
+            MotionPresets.attachPress(this)
+            setOnClickListener { Haptics.tick(this); palette?.show() }
+        }
+    }
+
+    // ---------------------------------------------------------------- Điều hướng trang
+
+    private fun goPage(i: Int) {
+        nav?.select(i, true)
+        navigate(i)
     }
 
     private fun navigate(i: Int) {
@@ -223,7 +396,7 @@ class MainActivity : Activity() {
         val sv = ScrollView(this).apply { overScrollMode = View.OVER_SCROLL_NEVER; isVerticalScrollBarEnabled = false }
         val h = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(10), dp(10), dp(10), dp(16))
+            setPadding(dp(10), dp(10), dp(10), pageBottomPad())
         }
         sv.addView(h)
         curScroll = sv; curHost = h
@@ -244,46 +417,60 @@ class MainActivity : Activity() {
         updateChip()
         fillPage(page, h)
         if (keep > 0) s.post { s.scrollTo(0, keep) }
+        sheetSpec?.let { sp -> if (sp.live && sheet?.showing == true) sheet?.replaceContent(sp.build()) }
     }
 
     private fun fillPage(i: Int, h: LinearLayout): List<View> {
-        bigTv = null; infoTv = null; seek = null
+        bigTv = null; infoTv = null; seek = null; previewView = null; usageBar = null; liveCardRef = null
         val d = dev
         val cards: List<View> = when (i) {
-            0 -> listOf(statusCard(d), quickCard(), featureCard())
+            0 -> dashboardCards(d)
             1 -> listOf(stretchCard(d), resetCard(d))
             2 -> listOf(gameCard())
-            3 -> listOf(tileCard(), floatCard())
+            3 -> listOf(tileCard(), floatCard(), appearanceCard())
             else -> listOf(deviceCard(d))
         }
         h.removeAllViews()
-        if (contentWdp >= 640 && cards.size > 1) {            // rộng: 2 cột
-            fun col() = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-            val left = col(); val right = col()
-            cards.forEachIndexed { idx, v -> (if (idx % 2 == 0) left else right).addView(v) }
-            val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-            row.addView(left, LinearLayout.LayoutParams(0, WRAP, 1f))
-            row.addView(right, LinearLayout.LayoutParams(0, WRAP, 1f))
-            h.addView(row)
-        } else if (contentWdp >= 640) {                        // 1 card trên màn rộng: không kéo giãn hết cỡ
-            val w = min(dp(720), dp(contentWdp - 20))
+        val ncol = columns()
+        lastCols = ncol
+        if (ncol >= 2 && cards.size > 1) {                    // rộng: nhiều cột
+            val n = min(ncol, cards.size)
+            val cols = List(n) { LinearLayout(this).apply { orientation = LinearLayout.VERTICAL } }
+            cards.forEachIndexed { idx, v -> cols[idx % n].addView(v) }
+            val grid = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+            cols.forEach { grid.addView(it, LinearLayout.LayoutParams(0, WRAP, 1f)) }
+            h.addView(grid)
+        } else if (ncol >= 2) {                               // 1 card trên màn rộng: không kéo giãn hết cỡ
+            val w = min(dp(720), dp(contentWdpNow() - 20))
             h.addView(cards[0], LinearLayout.LayoutParams(w, WRAP).apply { setMargins(dp(5), dp(5), dp(5), dp(5)) })
         } else {
             cards.forEach { h.addView(it) }
         }
+        if (i == 0) {
+            h.addView(Ui.btn(this, "Tùy chỉnh trang ⚙", Ui.GRAY) { customizeSheet() },
+                LinearLayout.LayoutParams(WRAP, WRAP).apply { setMargins(dp(5), dp(5), dp(5), dp(5)) })
+        }
         return cards
     }
 
-    private fun updateChip() {
+    // ---------------------------------------------------------------- Kết nối Shizuku (dùng cho chip + Live Dashboard)
+
+    private fun link(): Triple<LinkState, String, String> {
         val run = Shizu.running(); val ok = Shizu.granted(); val d = dev
-        val (s, t) = when {
-            !run -> LinkState.DISCONNECTED to "Shizuku: chưa chạy"
-            !ok -> LinkState.CONNECTING to "Shizuku: chờ cấp quyền"
-            d == null -> LinkState.CONNECTING to "Shizuku: đang kết nối…"
-            !d.viaShizuku -> LinkState.ERROR to "Shizuku: lỗi đọc dữ liệu"
-            else -> LinkState.CONNECTED to "Shizuku: đã kết nối"
+        return when {
+            !run -> Triple(LinkState.DISCONNECTED, "Shizuku: chưa chạy", "Chưa chạy")
+            !ok -> Triple(LinkState.CONNECTING, "Shizuku: chờ cấp quyền", "Chờ cấp quyền")
+            d == null -> Triple(LinkState.CONNECTING, "Shizuku: đang kết nối…", "Đang kết nối")
+            !d.viaShizuku -> Triple(LinkState.ERROR, "Shizuku: lỗi đọc dữ liệu", "Lỗi đọc dữ liệu")
+            else -> Triple(LinkState.CONNECTED, "Shizuku: đã kết nối", "Đã kết nối")
         }
-        chip?.update(s, t)
+    }
+
+    private fun updateChip() {
+        val (s, long, short) = link()
+        chip?.update(s, if (tablet) long else short)
+        Accent.update(prefs.active, Shizu.running() && Shizu.granted())   // Dynamic Accent theo trạng thái
+        glow?.setAccent(Accent.color)
     }
 
     /** Skeleton khi đang tải; trạng thái lỗi + thử lại nếu quá lâu không có dữ liệu. */
@@ -297,7 +484,264 @@ class MainActivity : Activity() {
             repeat(rows) { addView(Ui.skeleton(this@MainActivity, 0, 18)) }
         }
 
-    private fun card(title: String, vararg views: View) = LinearLayout(this).apply {
+    // ---------------------------------------------------------------- Tổng quan tùy chỉnh + Live Dashboard
+
+    private val dashNames = mapOf(
+        "live" to "Thông số trực tiếp", "status" to "Trạng thái Shizuku",
+        "quick" to "Hồ sơ nhanh", "feat" to "Tính năng chính"
+    )
+
+    private fun dashboardCards(d: Dev?): List<View> {
+        val hidden = uiPrefs.dashHidden()
+        val list = ArrayList<View>()
+        uiPrefs.dashOrder().forEach { id ->
+            if (id !in hidden) when (id) {
+                "live" -> list.add(liveCard(d))
+                "status" -> list.add(statusCard(d))
+                "quick" -> list.add(quickCard())
+                "feat" -> list.add(featureCard())
+            }
+        }
+        if (list.isEmpty()) {
+            list.add(card("Tổng quan",
+                Ui.emptyIllustration(this, R.drawable.ill_empty_list, "Tổng quan đang trống",
+                    "Bạn đã ẩn mọi card. Bật lại những card cần dùng.", "Tùy chỉnh") { customizeSheet() }))
+        }
+        return list
+    }
+
+    private fun metric(label: String, value: CharSequence, color: Int = Ui.TEXT): Pair<View, TextView> {
+        val v = Ui.tv(this, value, 18f, color, true)
+        val box = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = SurfaceDrawable(Ui.SURFACE_HI, Ui.LINE, dp(1).toFloat(), dp(12).toFloat())
+            setPadding(dp(12), dp(10), dp(12), dp(10))
+            addView(v)
+            addView(Ui.tv(this@MainActivity, label, 11f, Ui.DIM))
+        }
+        return box to v
+    }
+
+    /** Live Dashboard: số liệu thật từ Dev (độ phân giải, DPI, tần số quét) + trạng thái Shizuku. Chạm để mở chi tiết. */
+    private fun liveCard(d: Dev?): View {
+        val c = card("Thông số trực tiếp")
+        liveCardRef = c
+        // Scanning Sweep: chỉ khi thực sự có tác vụ đọc (lần đọc đầu hoặc làm mới có chủ ý)
+        if ((d == null && !devLoadFailed) || reloading) {
+            c.addView(ScanSweep(this), LinearLayout.LayoutParams(MATCH, WRAP).apply { bottomMargin = dp(10) })
+        }
+        if (d == null) { c.addView(loadingBlock(3)); return c }
+
+        val (resBox, resTv) = metric("Độ phân giải", "")
+        NumberRoll.bind(resTv, "live-res", floatArrayOf(max(d.curW, d.curH).toFloat(), min(d.curW, d.curH).toFloat())) { v ->
+            "${v[0].roundToInt()} × ${v[1].roundToInt()}"
+        }
+        val (dpiBox, dpiTv) = metric("Mật độ (DPI)", "")
+        NumberRoll.bind(dpiTv, "live-dpi", floatArrayOf(d.curDpi.toFloat())) { v -> "${v[0].roundToInt()}" }
+        val (hzBox, hzTv) = metric("Tần số quét", "")
+        NumberRoll.bind(hzTv, "live-hz", floatArrayOf(d.hz)) { v -> "${v[0].roundToInt()} Hz" }
+        val (state, longText, _) = link()
+        val (linkBox, _) = metric("Shizuku", longText.removePrefix("Shizuku: ").replaceFirstChar { it.uppercase() },
+            when (state) { LinkState.CONNECTED -> Ui.OK; LinkState.ERROR -> Ui.ERR; else -> Ui.TEXT })
+        c.addView(row(resBox, dpiBox))
+        c.addView(row(hzBox, linkBox))
+        c.addView(row(
+            Ui.btn(this, "Làm mới", Ui.GRAY) { refreshNow() },
+            Ui.btn(this, "Chi tiết ›", Ui.GRAY) { openSheet("Chi tiết thiết bị", { liveCardRef }, true) { detailContent() } }
+        ))
+        c.isClickable = true
+        c.setOnClickListener { Haptics.tick(c); openSheet("Chi tiết thiết bị", { liveCardRef }, true) { detailContent() } }
+        return c
+    }
+
+    private fun customizeSheet() = openSheet("Tùy chỉnh trang Tổng quan", { null }) { customizeContent() }
+
+    private fun commitDash(order: List<String>, hidden: Set<String>) {
+        uiPrefs.saveDash(order, hidden)
+        sheet?.replaceContent(customizeContent())
+        buildUi()
+    }
+
+    private fun customizeContent(): View {
+        val order = uiPrefs.dashOrder().toMutableList()
+        val hidden = uiPrefs.dashHidden().toMutableSet()
+        val box = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        box.addView(note("Bật/tắt để ẩn hoặc hiện card; dùng ▲ ▼ để đổi thứ tự. Tùy chỉnh được lưu trên máy."))
+        order.forEachIndexed { i, id ->
+            box.addView(LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
+                addView(Ui.switchRow(this@MainActivity, dashNames[id] ?: id, "Hiển thị trên Tổng quan", id !in hidden) {
+                    if (id in hidden) hidden.remove(id) else hidden.add(id)
+                    commitDash(order, hidden)
+                }, LinearLayout.LayoutParams(0, WRAP, 1f))
+                addView(Ui.btn(this@MainActivity, "▲", Ui.GRAY) {
+                    if (i > 0) { java.util.Collections.swap(order, i, i - 1); commitDash(order, hidden) }
+                })
+                addView(Ui.btn(this@MainActivity, "▼", Ui.GRAY) {
+                    if (i < order.size - 1) { java.util.Collections.swap(order, i, i + 1); commitDash(order, hidden) }
+                }, LinearLayout.LayoutParams(WRAP, WRAP).apply { leftMargin = dp(6) })
+            })
+        }
+        box.addView(row(Ui.btn(this, "Đặt lại mặc định", Ui.GRAY) { commitDash(UiPrefs.DASH_IDS, emptySet()) }))
+        return box
+    }
+
+    // ---------------------------------------------------------------- Bottom sheet (+ Shared Element Transition)
+
+    /** [origin]: thẻ nguồn để "mở rộng" thành bảng (null = trượt từ dưới lên). [live]: tự làm mới khi dữ liệu đổi. */
+    private fun openSheet(title: String, origin: () -> View?, live: Boolean = false, build: () -> View) {
+        val s = sheet ?: return
+        sheetSpec = SheetSpec(title, live, build)
+        s.originProvider = { originRectOf(origin()) }
+        s.show(title, build(), originRectOf(origin()), true)
+    }
+
+    private fun closeSheet() { sheet?.dismiss() }
+
+    private fun originRectOf(v: View?): Rect? {
+        val sh = sheet ?: return null
+        if (v == null || !v.isAttachedToWindow || v.width == 0 || v.visibility != View.VISIBLE) return null
+        val a = IntArray(2); val b = IntArray(2)
+        v.getLocationInWindow(a); sh.getLocationInWindow(b)
+        return Rect(a[0] - b[0], a[1] - b[1], a[0] - b[0] + v.width, a[1] - b[1] + v.height)
+    }
+
+    private fun detailContent(): View {
+        val d = dev
+        val box = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        if (d == null) {
+            box.addView(loadingBlock(7))
+        } else {
+            addDeviceRows(box, d)
+            box.addView(row(Ui.btn(this, "Chẩn đoán", Ui.GRAY) { showDiag() }))
+        }
+        return box
+    }
+
+    private fun gamesContent(): View {
+        val box = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        val games = Games.all(this)
+        if (games.isEmpty()) {
+            box.addView(Ui.emptyIllustration(this, R.drawable.ill_empty_game, "Chưa có game nào",
+                "Thêm game ở trang Game để chơi nhanh từ đây.", "Mở trang Game") { closeSheet(); goPage(2) })
+        } else {
+            games.forEach { box.addView(gameRow(it)) }
+        }
+        return box
+    }
+
+    // ---------------------------------------------------------------- Giao diện & chuyển động
+
+    private fun appearanceSheet() = openSheet("Giao diện & chuyển động", { null }) { appearanceContent() }
+
+    private fun refreshAppearance() {
+        sheet?.replaceContent(appearanceContent())
+        buildUi()
+        glow?.setRunning(page == 0)
+    }
+
+    private fun appearanceContent(): View {
+        val box = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        val lv = MotionPreferences.level
+        box.addView(Ui.tv(this, "Cường độ chuyển động", 14f, Ui.TEXT, true))
+        box.addView(row(
+            Ui.choice(this, "Reduced", lv == MotionPreferences.REDUCED, "mi:0") { MotionPreferences.setLevel(this, MotionPreferences.REDUCED); refreshAppearance() },
+            Ui.choice(this, "Normal", lv == MotionPreferences.NORMAL, "mi:1") { MotionPreferences.setLevel(this, MotionPreferences.NORMAL); refreshAppearance() },
+            Ui.choice(this, "Enhanced", lv == MotionPreferences.ENHANCED, "mi:2") { MotionPreferences.setLevel(this, MotionPreferences.ENHANCED); refreshAppearance() }
+        ))
+        box.addView(note(
+            if (MotionPreferences.systemReduce) "Android đang bật “Xóa hiệu ứng”: ứng dụng luôn giảm chuyển động, bất kể lựa chọn này."
+            else "Reduced: tắt glow, stagger, number rolling, dịch chuyển trang (vẫn giữ phản hồi thành công/lỗi). Enhanced: glow và ánh sáng theo chạm rõ hơn."))
+        box.addView(Ui.switchRow(this, "Rung phản hồi", "Rung nhẹ khi chọn, bật/tắt, hoàn tất (theo cài đặt rung của hệ thống)", uiPrefs.haptics) {
+            uiPrefs.haptics = !uiPrefs.haptics
+            Haptics.enabled = uiPrefs.haptics
+            refreshAppearance()
+        })
+        box.addView(Ui.switchRow(this, "Thanh thao tác nhanh", "Dock Áp dụng · Khôi phục · Game ở cuối màn hình", uiPrefs.dock) {
+            uiPrefs.dock = !uiPrefs.dock
+            dockView?.visibility = if (uiPrefs.dock) View.VISIBLE else View.GONE
+            applyInsets()
+            refreshAppearance()
+        })
+        return box
+    }
+
+    private fun appearanceCard(): View {
+        val c = card("Giao diện & chuyển động")
+        c.addView(Ui.tv(this, "Cường độ chuyển động, rung phản hồi, thanh thao tác nhanh.", 12f, Ui.MUTED))
+        c.addView(row(Ui.btn(this, "Mở cài đặt giao diện", Ui.GRAY) { appearanceSheet() }))
+        return c
+    }
+
+    // ---------------------------------------------------------------- Quick Action Dock
+
+    /** Dùng đúng callback Apply/Restore hiện có (cùng một nguồn cho nút chính, dock và palette). */
+    private fun applyRun(done: (Boolean) -> Unit) =
+        Actions.applyManual(this, prefs.k, prefs.wide, prefs.res, "app") { m -> done(!Actions.failed(m)); toast(m); reload() }
+
+    private fun restoreRun(done: (Boolean) -> Unit) =
+        Actions.restore(this, "app") { m -> done(!Actions.failed(m)); toast(m); reload() }
+
+    /** Khởi chạy thao tác dùng chung (palette): bỏ qua nếu thao tác cùng loại đang chạy -> không chạy 2 lần. */
+    private fun runShared(key: String, run: ((Boolean) -> Unit) -> Unit) {
+        if (MotionMemory.action(key).pending > 0) return
+        ActionButton.start(key)
+        run { ok -> ActionButton.complete(key, ok) }
+    }
+
+    private fun buildDock(): View {
+        val ctx = this
+        val games = Ui.btn(ctx, "Game ▸", Ui.GRAY) {}
+        gamesBtnRef = games
+        games.setOnClickListener { openSheet("Hồ sơ game", { gamesBtnRef }, true) { gamesContent() } }
+        return LinearLayout(ctx).apply {
+            orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
+            background = SurfaceDrawable(0xF2202026.toInt(), Ui.LINE, dp(1).toFloat(), dp(22).toFloat())
+            setPadding(dp(8), dp(8), dp(8), dp(8))
+            visibility = if (uiPrefs.dock) View.VISIBLE else View.GONE
+            fun lp() = LinearLayout.LayoutParams(dp(92), WRAP).apply { setMargins(dp(3), 0, dp(3), 0) }
+            addView(Ui.actionBtn(ctx, "Áp dụng", Ui.PINK, "apply", guard = true) { done -> applyRun(done) }, lp())
+            addView(Ui.actionBtn(ctx, "Khôi phục", Ui.GRAY, "restore", guard = true) { done -> restoreRun(done) }, lp())
+            addView(games, lp())
+        }
+    }
+
+    // ---------------------------------------------------------------- Command Palette
+
+    private fun commands(): List<Cmd> {
+        val out = ArrayList<Cmd>()
+        pages.forEachIndexed { i, pg -> out.add(Cmd("Đi tới ${pg.label}", "Trang", "trang chuyen mo", pg.icon) { goPage(i) }) }
+        out.add(Cmd("Áp dụng kéo dãn", "Hệ số hiện tại ${fmtK(prefs.k)}", "apply ap dung stretch keo dan ty le", R.drawable.ic_nav_stretch) {
+            runShared("apply") { done -> applyRun(done) }
+        })
+        out.add(Cmd("Khôi phục mặc định", "Trả màn hình về bình thường", "restore reset khoi phuc mac dinh", R.drawable.ic_rotate) {
+            runShared("restore") { done -> restoreRun(done) }
+        })
+        out.add(Cmd("Chẩn đoán", "Xem thông tin kỹ thuật", "chan doan diagnostic debug", R.drawable.ic_toast_info) { showDiag() })
+        out.add(Cmd("Bật/tắt Sửa cảm ứng", "Nâng cao · thử nghiệm", "cam ung touch modo", R.drawable.ic_nav_tools) { toggleTouch() })
+        out.add(Cmd("Bật/tắt Kéo giãn thật", "Nâng cao · lấp đầy viền đen", "keo gian that chieu that fill vien den", R.drawable.ic_nav_stretch) {
+            prefs.fill = !prefs.fill; buildUi()
+        })
+        out.add(Cmd("Lưu cài đặt hiện tại thành hồ sơ", "Hồ sơ nhanh", "luu ho so profile save", R.drawable.ic_check) { saveCurrent() })
+        out.add(Cmd(if (FloatingService.running) "Tắt cửa sổ nổi" else "Bật cửa sổ nổi", "Công cụ", "cua so noi floating overlay", R.drawable.ic_nav_tools) { toggleFloat() })
+        out.add(Cmd("Mở Shizuku", "Kết nối", "shizuku ket noi", R.drawable.ic_nav_device) { openShizuku() })
+        out.add(Cmd("Tùy chỉnh trang Tổng quan", "Ẩn/hiện, đổi thứ tự card", "tuy chinh dashboard tong quan an hien", R.drawable.ic_sliders) { customizeSheet() })
+        out.add(Cmd("Chi tiết thiết bị", "Thông số máy", "chi tiet thiet bi thong so device", R.drawable.ic_nav_device) {
+            openSheet("Chi tiết thiết bị", { null }, true) { detailContent() }
+        })
+        out.add(Cmd("Giao diện & chuyển động", "Reduced / Normal / Enhanced, rung, dock", "giao dien chuyen dong motion rung haptic dock", R.drawable.ic_sliders) { appearanceSheet() })
+        Profiles.all(this).forEach { p ->
+            out.add(Cmd("Hồ sơ: ${p.name}", p.summary(), "ho so profile bat", R.drawable.ic_play) { toggleProfile(p) })
+        }
+        val pm = packageManager
+        Games.all(this).forEach { g ->
+            val label = try { pm.getApplicationInfo(g.pkg, 0).loadLabel(pm).toString() } catch (_: Exception) { g.pkg }
+            out.add(Cmd("Chơi: $label", "Game · phiên bảo vệ", "game choi play", R.drawable.ic_play) { startSession(g) })
+        }
+        return out
+    }
+
+    private fun card(title: String, vararg views: View) = GlowCard(this).apply {
         orientation = LinearLayout.VERTICAL
         background = Ui.panel(context)
         setPadding(dp(18), dp(16), dp(18), dp(16))
@@ -360,7 +804,8 @@ class MainActivity : Activity() {
         val list = Profiles.all(this)
         val c = card("Hồ sơ nhanh")
         c.addView(Ui.tv(this, "Chạm = bật hồ sơ đã lưu (không cần kéo tay); chạm lần nữa = khôi phục. Giữ lâu để sửa / gán phím tắt.", 12f, Ui.MUTED))
-        if (list.isEmpty()) c.addView(note("Chưa có hồ sơ nào. Bấm “Lưu cài đặt hiện tại” để tạo."))
+        if (list.isEmpty()) c.addView(Ui.emptyIllustration(this, R.drawable.ill_empty_list, "Chưa có hồ sơ nào",
+            "Lưu cài đặt hiện tại để bật lại chỉ bằng một chạm.", "+ Lưu hiện tại") { saveCurrent() })
         list.chunked(4).forEach { chunk ->
             val views = chunk.map { chip(it) }.toMutableList<View>()
             while (views.size < 4) views.add(View(this))
@@ -517,6 +962,11 @@ class MainActivity : Activity() {
     private fun deviceCard(d: Dev?): View {
         val c = card("Thông tin thiết bị")
         if (d == null) { c.addView(loadingBlock(7)); return c }
+        addDeviceRows(c, d)
+        return c
+    }
+
+    private fun addDeviceRows(c: LinearLayout, d: Dev) {
         c.addView(kv("Máy", d.model))
         c.addView(kv("Hệ điều hành", d.android))
         c.addView(kv("Chip", d.soc))
@@ -530,7 +980,6 @@ class MainActivity : Activity() {
         c.addView(kv("Tần số quét", String.format(Locale.US, "%.0f Hz — hỗ trợ: %s", d.hz, d.modes)))
         if (d.redmagic) c.addView(note("Đã nhận diện thiết bị RedMagic/Nubia ✔"))
         if (!d.viaShizuku) c.addView(note("Chưa có Shizuku: số liệu lấy từ API Android, có thể thiếu thông tin phần đã chỉnh."))
-        return c
     }
 
     // ---- Kéo dãn (chỉnh tay)
@@ -578,14 +1027,19 @@ class MainActivity : Activity() {
             Ui.choice(this, "Rộng (viền trên/dưới)", prefs.wide, "dir:wide") { prefs.wide = true; buildUi() },
             Ui.choice(this, "Hẹp (viền trái/phải)", !prefs.wide, "dir:narrow") { prefs.wide = false; buildUi() }
         ))
+        // Preset Preview: chỉ VẼ minh hoạ từ Plan (đọc-chỉ), không gửi lệnh nào tới hệ thống
+        val pv = RatioPreview(this)
+        previewView = pv
+        c.addView(pv, LinearLayout.LayoutParams(MATCH, WRAP).apply { topMargin = dp(8) })
+        // Liquid Progress Bar: mức kéo hiện tại so với mức tối đa an toàn của máy (giá trị thật)
+        val ub = LiquidBar(this)
+        usageBar = ub
+        c.addView(Ui.tv(this, "Mức kéo so với tối đa của máy", 11f, Ui.DIM).apply { setPadding(0, dp(6), 0, 0) })
+        c.addView(ub, LinearLayout.LayoutParams(MATCH, WRAP).apply { topMargin = dp(4) })
         c.addView(infoTv!!)
         c.addView(row(
-            Ui.actionBtn(this, "Áp dụng", Ui.PINK, "apply") { done ->
-                Actions.applyManual(this, prefs.k, prefs.wide, prefs.res, "app") { m -> done(!Actions.failed(m)); toast(m); reload() }
-            },
-            Ui.actionBtn(this, "Reset mặc định", Ui.GRAY, "restore") { done ->
-                Actions.restore(this, "app") { m -> done(!Actions.failed(m)); toast(m); reload() }
-            }
+            withBar(Ui.actionBtn(this, "Áp dụng", Ui.PINK, "apply") { done -> applyRun(done) }, "apply"),
+            withBar(Ui.actionBtn(this, "Reset mặc định", Ui.GRAY, "restore") { done -> restoreRun(done) }, "restore")
         ))
         c.addView(row(Ui.btn(this, "+ Lưu thành hồ sơ nhanh", Ui.GRAY) { saveCurrent() }))
 
@@ -610,6 +1064,14 @@ class MainActivity : Activity() {
         return c
     }
 
+    /** Nút + thanh chất lỏng bám trạng thái thật của thao tác (đang xử lý / thành công / lỗi). */
+    private fun withBar(btn: Button, key: String): View = LinearLayout(this).apply {
+        orientation = LinearLayout.VERTICAL
+        addView(btn, LinearLayout.LayoutParams(MATCH, WRAP))
+        addView(LiquidBar(this@MainActivity).apply { bindAction(key) },
+            LinearLayout.LayoutParams(MATCH, WRAP).apply { topMargin = dp(6) })
+    }
+
     /** [live] = true khi người dùng đang kéo (cập nhật số ngay); false khi dựng view (số đã được Number Rolling lo). */
     private fun updatePreview(live: Boolean = true) {
         val d = dev
@@ -619,6 +1081,16 @@ class MainActivity : Activity() {
             prefs.k = p.k; seek?.progress = ((p.k - 1f) * 100).roundToInt(); clamped = true
         }
         if (live || clamped) { bigTv?.text = fmtK(prefs.k); NumberRoll.set("k", floatArrayOf(prefs.k)) }
+        if (p != null && d != null) {
+            val panelA = max(d.physW, d.physH).toFloat() / min(d.physW, d.physH)
+            val real = prefs.fill && !p.isDefault
+            previewView?.update(panelA, p.aspect, real,
+                "Xem trước · ${DeviceInfo.aspectLabel(p.vl, p.vs)}" +
+                    (if (real) " · lấp đầy, không viền" else String.format(Locale.US, " · viền đen ≈ %.1f%%", p.barPct)),
+                !live)
+            val usage = if (p.maxK > 1f) (p.k - 1f) / (p.maxK - 1f) else 0f
+            usageBar?.showValue(usage, "bar:usage", !live)
+        }
         infoTv?.text = if (p == null || d == null) "Chưa đọc được thông tin máy" else
             "Màn hình ảo: ${p.vl}×${p.vs} (${DeviceInfo.aspectLabel(p.vl, p.vs)})\n" +
             "DPI: ${if (prefs.active && prefs.baseDpi > 0) prefs.baseDpi else d.curDpi} → ${p.density}\n" +
@@ -750,7 +1222,8 @@ class MainActivity : Activity() {
                 ui.postDelayed({ reload() }, 1500)
             }))
         }
-        if (games.isEmpty()) c.addView(note("Chưa có game nào. Bấm “+ Thêm game”."))
+        if (games.isEmpty()) c.addView(Ui.emptyIllustration(this, R.drawable.ill_empty_game, "Chưa có game nào",
+            "Thêm game để chơi với phiên bảo vệ tự khôi phục.", "+ Thêm game") { pickGame() })
         games.forEach { c.addView(gameRow(it)) }
         c.addView(row(Ui.btn(this, "+ Thêm game", Ui.GRAY) { pickGame() }))
         c.addView(note("Nên áp dụng TRƯỚC khi vào game. Đổi độ phân giải giữa trận có thể làm game tải lại hoặc thoát."))

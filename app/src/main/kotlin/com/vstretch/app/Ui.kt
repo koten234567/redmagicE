@@ -27,6 +27,7 @@ import android.widget.SeekBar
 import android.widget.TextView
 import com.vstretch.app.motion.ActionButton
 import com.vstretch.app.motion.ElasticSwitch
+import com.vstretch.app.motion.Haptics
 import com.vstretch.app.motion.MotionPresets
 import com.vstretch.app.motion.SelectionMotion
 import com.vstretch.app.motion.Skeleton
@@ -145,9 +146,9 @@ object Ui {
      * Nút có trạng thái Processing Ring -> Success Morph. [run] nhận hàm `finish(ok)`;
      * gọi finish đúng khi backend đã trả kết quả (không giả lập tiến độ).
      */
-    fun actionBtn(c: Context, s: String, fill: Int, key: String, run: (finish: (Boolean) -> Unit) -> Unit): Button {
+    fun actionBtn(c: Context, s: String, fill: Int, key: String, guard: Boolean = false, run: (finish: (Boolean) -> Unit) -> Unit): Button {
         val primary = fill == PINK
-        return ActionButton(c, key, primary).apply {
+        return ActionButton(c, key, primary, guard).apply {
             styleButton(this, s, primary)
             setOnClickListener { begin(run) }
         }
@@ -158,7 +159,7 @@ object Ui {
         val r = dp(c, 12).toFloat()
         val surf = SurfaceDrawable(SURFACE_HI, LINE, dp(c, 1).toFloat(), r, selFill = PINK_DEEP)
         return Button(c).apply {
-            background = ripple(surf, 0x55FF2E93, r)
+            background = surf       // phản hồi riêng: viền hồng + đường sáng + co nhẹ (không dùng ripple)
             stateListAnimator = null
             text = s; isAllCaps = false; textSize = 13f
             typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
@@ -167,7 +168,7 @@ object Ui {
             setPadding(dp(c, 12), 0, dp(c, 12), 0)
             SelectionMotion.bind(this, surf, key, selected)
             MotionPresets.attachPress(this)
-            setOnClickListener { onClick() }
+            setOnClickListener { Haptics.tick(this); onClick() }
         }
     }
 
@@ -182,10 +183,9 @@ object Ui {
             addView(tv(c, sub, 12f, DIM))
         }, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
         addView(sw)
-        background = ripple(null, 0x33FF2E93, dp(c, 10).toFloat())
         isClickable = true
-        MotionPresets.attachPress(this, scale = false) { down -> sw.press(down) }
-        setOnClickListener { onClick() }
+        MotionPresets.attachPress(this, scale = false) { down -> sw.press(down) }   // phản hồi riêng: thumb co lại
+        setOnClickListener { Haptics.tick(this); onClick() }
     }
 
     /** Ô tính năng lớn: tiêu đề + mô tả + trạng thái BẬT/TẮT (có ký hiệu, không chỉ màu), chạm để đổi. */
@@ -195,14 +195,14 @@ object Ui {
         val r = dp(c, 12).toFloat()
         val surf = SurfaceDrawable(SURFACE_HI, LINE, dp(c, 1).toFloat(), r,
             glow = 0x66FF2E93, glowW = dp(c, 3).toFloat(), selFill = PINK_DEEP)
-        background = ripple(surf, 0x55FF2E93, r)
+        background = surf
         SelectionMotion.bind(this, surf, "feat:$title", on)
         addView(tv(c, title, 12f, if (on) TEXT else MUTED, true).apply { letterSpacing = 0.03f })
         addView(tv(c, sub, 11f, DIM).apply { setPadding(0, dp(c, 2), 0, dp(c, 6)) })
         addView(tv(c, if (on) "● BẬT" else "○ TẮT", 11f, if (on) PINK else DIM, true))
         isClickable = true
         MotionPresets.attachPress(this)
-        setOnClickListener { onClick() }
+        setOnClickListener { Haptics.tick(this); onClick() }
     }
 
     /** Thanh trượt: rãnh tối, phần đã kéo hồng, núm sáng viền hồng. */
@@ -223,6 +223,18 @@ object Ui {
         addView(ImageView(c).apply { setImageResource(R.drawable.ic_toast_warning); setColorFilter(WARN) },
             LinearLayout.LayoutParams(dp(c, 24), dp(c, 24)))
         addView(tv(c, msg, 13f, MUTED).apply { gravity = Gravity.CENTER; setPadding(0, dp(c, 8), 0, dp(c, 4)) })
+        if (actionLabel != null && onAction != null) addView(btn(c, actionLabel, GRAY) { onAction() })
+    }
+
+    /** Trạng thái trống có minh hoạ vector nhẹ (hồ sơ game, tìm kiếm, danh sách). */
+    fun emptyIllustration(c: Context, drawable: Int, title: String, sub: String,
+                          actionLabel: String? = null, onAction: (() -> Unit)? = null) = LinearLayout(c).apply {
+        orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER_HORIZONTAL
+        setPadding(dp(c, 8), dp(c, 14), dp(c, 8), dp(c, 10))
+        addView(ImageView(c).apply { setImageResource(drawable); importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO },
+            LinearLayout.LayoutParams(dp(c, 96), dp(c, 96)))
+        addView(tv(c, title, 14f, TEXT, true).apply { gravity = Gravity.CENTER; setPadding(0, dp(c, 6), 0, 0) })
+        addView(tv(c, sub, 12f, MUTED).apply { gravity = Gravity.CENTER; setPadding(0, dp(c, 4), 0, dp(c, 6)) })
         if (actionLabel != null && onAction != null) addView(btn(c, actionLabel, GRAY) { onAction() })
     }
 

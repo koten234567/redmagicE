@@ -77,8 +77,6 @@ class NavBar(
                 isClickable = true
                 isFocusable = true
                 contentDescription = item.label
-                val mask = GradientDrawable().apply { setColor(Color.WHITE); cornerRadius = 10 * d }
-                foreground = RippleDrawable(ColorStateList.valueOf(0x33FF2E93), null, mask)
                 if (vertical) {
                     orientation = LinearLayout.HORIZONTAL
                     setPadding((14 * d).toInt(), 0, (14 * d).toInt(), 0)

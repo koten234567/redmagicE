@@ -20,9 +20,31 @@ object MotionMemory {
     val rolled = HashMap<String, FloatArray>()
     val visitedPages = HashSet<Int>()
     val actions = HashMap<String, ActionRec>()
-    val buttons = HashMap<String, WeakReference<ActionButton>>()
+    private val buttons = HashMap<String, MutableList<WeakReference<ActionButton>>>()
+    private val bars = HashMap<String, MutableList<WeakReference<LiquidBar>>>()
 
     fun action(key: String): ActionRec = actions.getOrPut(key) { ActionRec() }
+
+    fun addButton(key: String, b: ActionButton) {
+        buttons.getOrPut(key) { ArrayList() }.add(WeakReference(b))
+    }
+
+    fun addBar(key: String, b: LiquidBar) {
+        bars.getOrPut(key) { ArrayList() }.add(WeakReference(b))
+    }
+
+    /** Các nút còn sống cho [key] (đồng thời dọn tham chiếu đã chết). */
+    fun liveButtons(key: String): List<ActionButton> {
+        val l = buttons[key] ?: return emptyList()
+        l.removeAll { it.get() == null }
+        return l.mapNotNull { it.get() }
+    }
+
+    fun liveBars(key: String): List<LiquidBar> {
+        val l = bars[key] ?: return emptyList()
+        l.removeAll { it.get() == null }
+        return l.mapNotNull { it.get() }
+    }
 }
 
 /** Các animation dựng sẵn dùng lại ở nhiều nơi. */

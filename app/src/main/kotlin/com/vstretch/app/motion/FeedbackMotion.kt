@@ -41,7 +41,7 @@ import kotlin.math.min
  * Không giả lập % tiến độ. Không chặn thêm thao tác ngoài quy tắc của logic hiện tại.
  * Trạng thái nằm trong [MotionMemory] nên vẫn tiếp tục đúng khi UI được dựng lại.
  */
-class ActionButton(c: Context, private val key: String, private val primary: Boolean) : Button(c) {
+class ActionButton(c: Context, private val key: String, private val primary: Boolean, private val guard: Boolean = false) : Button(c) {
     private val d = c.resources.displayMetrics.density
     private val rec = MotionMemory.action(key)
     private val p = Paint(Paint.ANTI_ALIAS_FLAG).apply {
@@ -59,7 +59,7 @@ class ActionButton(c: Context, private val key: String, private val primary: Boo
     private val idleRun = Runnable { idle() }
 
     init {
-        MotionMemory.buttons[key] = WeakReference(this)
+        MotionMemory.addButton(key, this)
         p.strokeWidth = 2f * d
     }
 
@@ -67,10 +67,8 @@ class ActionButton(c: Context, private val key: String, private val primary: Boo
 
     /** Gọi khi người dùng bấm: hiện vòng xử lý rồi chạy [run]; [run] phải gọi finish(ok) khi backend trả về. */
     fun begin(run: ((Boolean) -> Unit) -> Unit) {
-        rec.pending++
-        rec.result = 0
-        MotionMemory.buttons[key] = WeakReference(this)
-        sync()
+        if (guard && rec.pending > 0) return      // Dock: không thực thi lần hai khi bấm liên tục
+        start(key)
         run { success -> complete(key, success) }
     }
 
@@ -244,15 +242,34 @@ class ActionButton(c: Context, private val key: String, private val primary: Boo
         private const val HOLD_END = 1150L
         private const val TOTAL = 1300L
 
-        /** Backend đã trả kết quả. Cập nhật bản ghi rồi đồng bộ nút còn sống (nếu có). */
+        /** Bắt đầu một thao tác (nút, dock hoặc palette): mọi nút/thanh cùng key hiện vòng xử lý. */
+        fun start(key: String) {
+            val r = MotionMemory.action(key)
+            r.pending++
+            r.result = 0
+            syncAll(key)
+        }
+
+        /** Backend đã trả kết quả. Cập nhật bản ghi rồi đồng bộ mọi nút/thanh còn sống cùng key. */
         fun complete(key: String, success: Boolean) {
             val r = MotionMemory.action(key)
             if (r.pending > 0) r.pending--
-            if (r.pending == 0) {
+            val finished = r.pending == 0
+            if (finished) {
                 r.result = if (success) 1 else 2
                 r.resultAt = SystemClock.uptimeMillis()
             }
-            MotionMemory.buttons[key]?.get()?.let { if (it.isAttachedToWindow) it.sync() }
+            syncAll(key)
+            if (finished) {
+                MotionMemory.liveButtons(key).firstOrNull { it.isAttachedToWindow }?.let {
+                    if (success) Haptics.confirm(it) else Haptics.reject(it)
+                }
+            }
+        }
+
+        private fun syncAll(key: String) {
+            MotionMemory.liveButtons(key).forEach { if (it.isAttachedToWindow) it.sync() }
+            MotionMemory.liveBars(key).forEach { if (it.isAttachedToWindow) it.syncAction() }
         }
     }
 }
@@ -269,6 +286,9 @@ enum class ToastType { SUCCESS, ERROR, WARNING, INFO }
  */
 class ToastHost(c: Context) : FrameLayout(c) {
     private val d = c.resources.displayMetrics.density
+
+    /** Khoảng đệm phía dưới (px): thanh điều hướng, dock, system inset — để toast không che nút. */
+    var bottomExtra = 0
     private val h = Handler(Looper.getMainLooper())
     private var current: View? = null
     private val hide = Runnable { dismiss() }
@@ -279,7 +299,7 @@ class ToastHost(c: Context) : FrameLayout(c) {
         val v = build(msg, type)
         addView(v, LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT).apply {
             gravity = Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
-            bottomMargin = (24 * d).toInt()
+            bottomMargin = (24 * d).toInt() + bottomExtra
             leftMargin = (16 * d).toInt(); rightMargin = (16 * d).toInt()
         })
         current = v

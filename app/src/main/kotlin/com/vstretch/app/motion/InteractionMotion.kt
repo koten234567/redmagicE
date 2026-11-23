@@ -6,7 +6,11 @@ import android.animation.ValueAnimator
 import android.content.Context
 import android.graphics.Canvas
 import android.graphics.Paint
+import android.graphics.Path
+import android.graphics.RadialGradient
 import android.graphics.RectF
+import android.graphics.Shader
+import android.view.MotionEvent
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
@@ -162,7 +166,11 @@ class MagneticSeekBar(c: Context) : SeekBar(c) {
 
         var near = -1
         marks.forEachIndexed { i, m -> if (near < 0 && abs(now - idx(m)) <= MotionTokens.SNAP_RANGE) near = i }
-        if (near != lastNear) { lastNear = near; retarget(near) }
+        if (near != lastNear) {
+            lastNear = near
+            retarget(near)
+            if (near >= 0 && isPressed) Haptics.tick(this)   // 1 nhịp khi vừa chạm vạch preset (không rung liên tục)
+        }
 
         marks.forEachIndexed { i, m ->
             val x = l + avail * idx(m) / max.toFloat()
@@ -299,6 +307,81 @@ class ExpandablePanel(c: Context, title: String, private val key: String, privat
 
     override fun onDetachedFromWindow() {
         anim?.cancel()
+        super.onDetachedFromWindow()
+    }
+}
+
+
+/**
+ * Interactive Glow Tracking: ánh sáng hồng mờ bám theo ngón tay trên bề mặt thẻ.
+ * Chỉ dành cho thẻ nội dung (không phải nút), nằm DƯỚI nội dung, bị cắt theo góc bo.
+ * Tắt hoàn toàn khi Reduce Motion / cường độ Reduced; Enhanced sáng hơn một chút.
+ */
+class GlowCard(c: Context) : LinearLayout(c) {
+    private val d = c.resources.displayMetrics.density
+    private val p = Paint(Paint.ANTI_ALIAS_FLAG)
+    private val clip = Path()
+    private var gx = 0f
+    private var gy = 0f
+    private var level = 0f
+    private var anim: ValueAnimator? = null
+    private var shader: RadialGradient? = null
+    private var shaderKey = 0
+    private val radius = 150f * d
+
+    override fun onSizeChanged(w: Int, h: Int, ow: Int, oh: Int) {
+        clip.reset()
+        clip.addRoundRect(RectF(0f, 0f, w.toFloat(), h.toFloat()), 14f * d, 14f * d, Path.Direction.CW)
+    }
+
+    override fun dispatchTouchEvent(e: MotionEvent): Boolean {
+        if (!MotionPreferences.reduce) {
+            when (e.actionMasked) {
+                MotionEvent.ACTION_DOWN -> { gx = e.x; gy = e.y; fadeTo(1f) }
+                MotionEvent.ACTION_MOVE -> { gx = e.x; gy = e.y; if (level > 0f) invalidate() }
+                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> fadeTo(0f)
+            }
+        }
+        return super.dispatchTouchEvent(e)
+    }
+
+    private fun fadeTo(to: Float) {
+        anim?.cancel()
+        anim = ValueAnimator.ofFloat(level, to).apply {
+            duration = if (to > level) MotionTokens.FAST else MotionTokens.SMOOTH
+            interpolator = MotionTokens.STANDARD
+            addUpdateListener { level = it.animatedValue as Float; invalidate() }
+            start()
+        }
+    }
+
+    private fun ensureShader() {
+        val key = Accent.color xor (if (MotionPreferences.enhanced) 1 else 0)
+        if (shader != null && key == shaderKey) return
+        shaderKey = key
+        val a = if (MotionPreferences.enhanced) 0x4A else 0x30
+        val c = Accent.color and 0x00FFFFFF
+        shader = RadialGradient(0f, 0f, radius, intArrayOf((a shl 24) or c, c), null, Shader.TileMode.CLAMP)
+    }
+
+    override fun dispatchDraw(cv: Canvas) {
+        if (level > 0.01f && !MotionPreferences.reduce) {
+            ensureShader()
+            cv.save()
+            cv.clipPath(clip)
+            cv.translate(gx, gy)
+            p.shader = shader
+            p.alpha = (255 * level).toInt().coerceIn(0, 255)
+            cv.drawCircle(0f, 0f, radius, p)
+            cv.restore()
+        }
+        super.dispatchDraw(cv)
+    }
+
+    override fun onDetachedFromWindow() {
+        anim?.cancel()
+        anim = null
+        level = 0f
         super.onDetachedFromWindow()
     }
 }

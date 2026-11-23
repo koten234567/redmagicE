@@ -133,3 +133,53 @@ vẫn giữ feedback thành công/thất bại (tick/X hiện tĩnh), ripple và
 
 **Lưu ý:** mục *Nâng cao* (Kéo giãn thật, Sửa cảm ứng, Chẩn đoán, % độ phân giải) mặc định thu gọn; trạng thái mở được nhớ trong phiên.
 Ripple dùng `RippleDrawable` của hệ thống nên thời lượng do Android quyết định (xấp xỉ 350ms).
+
+
+## v2.9.0 — Futuristic Gaming Motion & UI Upgrade
+
+**Chưa build/chạy thử.** Môi trường phát triển không có Kotlin/Gradle/Android SDK nên mã chỉ được rà soát tĩnh
+(cân bằng ngoặc, tham chiếu resource, so sánh với 2.8). Hãy build bằng GitHub Actions (workflow đã thêm bước **Debug**
+bên cạnh Release → tải artifact `StretchX-debug-apk` / `StretchX-arm64-v8a-apk`) hoặc `gradle :app:assembleDebug`.
+Nếu có lỗi biên dịch, gửi log để sửa.
+
+### Business logic: KHÔNG thay đổi
+`Engine`, `Sf`, `Touch`, `Shizu`, `Stretch`, `Profiles`, `Prefs`, `Keys`, `DeviceInfo`, `SessionService`, `ShellService`, `Tile`,
+AIDL, `AndroidManifest.xml`, applicationId/ABI/ký APK **giữ nguyên byte-for-byte so với 2.8** (đã so sánh bằng `cmp`).
+Các nút Áp dụng/Khôi phục/hồ sơ/game gọi đúng `Actions.*` như cũ; trạng thái Loading/Success/Error chỉ phản chiếu callback thật.
+Tuỳ chỉnh giao diện lưu trong SharedPreferences riêng `stretchx_ui` (lớp `UiPrefs`), không đụng `Prefs`.
+
+### Trạng thái từng tính năng
+| # | Tính năng | Trạng thái | Ghi chú |
+|---|---|---|---|
+| 1 | Interactive Glow Tracking | ✅ | `GlowCard`: ánh sáng bám ngón tay trên thẻ nội dung, nằm dưới nội dung, tắt khi Reduced |
+| 2 | Liquid Progress Bar | ✅ | `LiquidBar`: (a) đồng hồ "mức kéo / tối đa của máy" lấy từ `Plan`; (b) dưới Áp dụng/Khôi phục: đang xử lý = dải không xác định (không % giả), chỉ đổ đầy xanh/đỏ khi backend trả về |
+| 3 | Shared Element Transition | ✅ (2 điểm) | Thẻ "Thông số trực tiếp" → bảng chi tiết; nút Game ở dock → bảng game. Có xử lý Back, kéo tay nắm, xoay màn hình (dựng lại sheet không animate) |
+| 4 | Scanning Sweep | ✅ | Chỉ hiện khi đọc thông tin máy lần đầu hoặc bấm "Làm mới"; gỡ ngay khi xong/lỗi |
+| 5 | Contextual Micro-interactions | ✅ | Mỗi loại một phản hồi: chip/preset (viền + đường sáng), công tắc (thumb co), thẻ (glow), nút chính (ripple + vòng xử lý). Ripple chỉ còn ở nút chính |
+| 6 | Haptic Feedback | ✅ | `Haptics` qua `performHapticFeedback` (theo cài đặt rung hệ thống); chọn preset/bật tắt/hoàn tất; 1 nhịp khi thanh trượt chạm vạch preset |
+| 7 | Live Device Dashboard | ✅ | Độ phân giải, DPI, tần số quét (từ `Dev`), trạng thái Shizuku. Cập nhật mỗi lần `reload()` (không dùng timer giả) |
+| 8 | Customizable Dashboard | ✅ | Ẩn/hiện + đổi thứ tự bằng nút ▲▼ (chưa có kéo-thả) |
+| 9 | Smart Bottom Sheet | ✅ | `BottomSheet`: Back, chạm nền, kéo xuống, vùng an toàn |
+| 10 | Quick Action Dock | ✅ | Áp dụng · Khôi phục · Game; chống bấm trùng (bỏ qua khi thao tác cùng loại đang chạy) |
+| 11 | Command Palette | ✅ | Nút tìm kiếm; tìm không dấu; trang, hành động, hồ sơ, game, cài đặt |
+| 12 | Adaptive Layout | ✅ | 1/2/3 cột theo bề rộng thực; sidebar ≥600dp; theo dõi xoay/đổi kích thước cửa sổ |
+| 13 | Dynamic Accent | ◐ một phần | Sắc độ hồng đổi nhẹ (bình thường / đang kéo giãn / Shizuku chưa sẵn sàng) chỉ áp cho ambient glow, glow theo chạm, scan sweep, preview. Màu thương hiệu `Ui.PINK` (const) không đổi |
+| 14 | Preset Preview | ✅ | `RatioPreview`: vẽ viền đen/kéo giãn của cấu hình đang chọn trước khi Áp dụng; chỉ đọc từ `Plan`, không gửi lệnh |
+| 15 | Motion Intensity | ✅ | Reduced / Normal / Enhanced (Công cụ → Giao diện); Reduce Motion hệ thống luôn thắng |
+| 16 | Edge-to-edge | ✅ | Trong suốt status/nav bar, xử lý cutout & insets cho sidebar, top bar, nav, dock, sheet, toast, trang |
+| 17 | Empty State Illustration | ✅ | Vector `ill_empty_*`: hồ sơ nhanh, game, tìm kiếm, Tổng quan trống |
+
+### Hành vi UI mới cần biết
+- Back: palette → bottom sheet → về Tổng quan → thoát.
+- Tổng quan có card mới "Thông số trực tiếp" (mặc định ở đầu; ẩn được).
+- Trang Công cụ có card "Giao diện & chuyển động".
+
+### File thay đổi
+Sửa: `MainActivity.kt`, `Ui.kt`, `motion/{MotionPreferences,MotionPresets,FeedbackMotion,InteractionMotion,NavigationMotion,AmbientMotion}.kt`,
+`app/build.gradle.kts` (version 2.9.0 / 2900), `.github/workflows/build.yml` (thêm build Debug), `README.md`.
+Thêm: `motion/{UiPrefs,Haptics,Accent,ProgressMotion,SheetMotion,PreviewMotion}.kt`,
+drawable `ic_{search,sliders,play,rotate,check}.xml`, `ill_empty_{list,game,search}.xml`.
+
+### Cần kiểm tra khi có máy
+Apply/Restore (nút chính, dock, palette), Shizuku connect/disconnect, hồ sơ + game, cửa sổ nổi, xoay màn hình khi sheet mở,
+Reduce Motion + 3 mức cường độ, cutout/gesture bar, bàn phím trong palette, haptic trên máy thật.
